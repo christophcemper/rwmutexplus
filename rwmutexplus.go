@@ -109,7 +109,7 @@ func (m *InstrumentedRWMutex) Unlock() {
 
 	waitDuration := time.Since(m.lastLockTime)
 	if waitDuration > m.lockWaitTimeout {
-		fmt.Printf("\n=== LOCK HELD TOO LONG! ===\n")
+		fmt.Printf("\n=== LOCK HELD TOO LONG ===\n")
 		fmt.Printf("Been holding mutex lock for %v\n", waitDuration)
 		fmt.Printf("Caller: %s\n", m.lastLockHolder)
 		fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))

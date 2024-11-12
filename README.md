@@ -6,14 +6,28 @@ It should help us spot timing and concurrency issue better.
 ## Author
 Christoph C. Cemper
 
+
+## Use cases
+
+- Find lock contention
+- Identify concurrency where no concurrency should be (set timeout to really low)
+- Indentify abnormally long running actions during exclusive RW locks
+
 ## Features
 
-- Monitors lock wait times and emits warnings for potential deadlocks
-- Tracks lock holders with function names and file locations
+- Monitors lock wait times warns if a lock waits too long or are held for too long
 - Prints warnings when locks are held too long
-- Prints warnings whne locks are being waited for too long
+- Prints warnings when locks are being waited for too long
 - Provides detailed stack traces when lock contention occurs
+- Tracks lock holders with function names and file locations
 - Filters runtime noise from stack traces for better readability
+
+## Current warnings supported
+
+- LOCK WAIT TIMEOUT WARNING = lock requested, but timeout exceeded
+- LONG LOCK HOLD WARNING = a lock holder holds the lock longer than allowed
+- LOCK ACQUIRED TOO SLOW = a lock requested finally got the lock, but too late
+- LOCK HELD TOO LONG = a slow lock holder finally released the lock
 
 ## Example Output
 
