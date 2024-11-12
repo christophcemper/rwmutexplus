@@ -129,7 +129,7 @@ func main() {
 
 ```
 
-The output of the above example/main.go will be something like this
+The output of the above [examples/main.go](examples/main.go) will be something like this
 
 `go run -race  example/main.go`
 ```
