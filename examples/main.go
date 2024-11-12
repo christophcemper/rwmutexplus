@@ -8,7 +8,8 @@ import (
 )
 
 func mylocker2(mutex *rwmutexplus.InstrumentedRWMutex) {
-	mutex.Lock()
+	mutex.Lock() // Acquire lock but do not set purpose
+	// mutex.LockPurpose("mylocker2")
 	fmt.Printf("mylocker2 lock acquired\n")
 	time.Sleep(500 * time.Millisecond) // Hold lock for 500ms
 	mutex.Unlock()
@@ -21,7 +22,7 @@ func main() {
 
 	// Create lock contention*
 	mylocker1 := func() {
-		mutex.Lock()
+		mutex.LockPurpose("mylocker1")
 		fmt.Printf("mylocker1 lock acquired\n")
 		time.Sleep(300 * time.Millisecond) // Hold lock for 300ms
 		mutex.Unlock()
@@ -41,7 +42,7 @@ func main() {
 	time.Sleep(10 * time.Millisecond) // Let goroutine acquire lock
 
 	// This will trigger a warning as the goroutine is holding the lock still
-	mutex.Lock()
+	mutex.LockPurpose("main")
 	fmt.Printf("Main Lock acquired\n")
 	time.Sleep(50 * time.Millisecond) // pretend  to add some work in critical section
 	mutex.Unlock()
