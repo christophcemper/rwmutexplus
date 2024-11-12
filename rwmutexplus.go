@@ -52,7 +52,8 @@ func NewInstrumentedRWMutex(lockWaitTimeout time.Duration) *InstrumentedRWMutex 
 }
 
 // Lock acquires an exclusive lock and monitors the wait time.
-// If the wait exceeds lockWaitTimeout, it prints a warning with stack trace and lock holder information.
+// If the wait exceeds lockWaitTimeout, it prints a warning with stack trace and lock holder information
+// If the lock is still held after lockWaitTimeout, it prints a warning that the lock is still held
 func (m *InstrumentedRWMutex) Lock() {
 	lockCaller := getCallerInfo()
 	waitStart := time.Now()
@@ -63,14 +64,21 @@ func (m *InstrumentedRWMutex) Lock() {
 		m.debugMutex.Lock()
 		if m.lastLockTime.Add(m.lockWaitTimeout).Before(time.Now()) {
 			waitDuration := time.Since(waitStart)
-			fmt.Printf("\n=== LOCK WAIT WARNING ===\n")
-			fmt.Printf("Waiting for mutex lock for %v\n", waitDuration)
-			fmt.Printf("Caller: %s\n", lockCaller)
-			fmt.Printf("Last lock holder: %s\n", m.lastLockHolder)
-			fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
-			fmt.Printf("Current stack trace:\n%s", filterStack(stackTrace))
-			// fmt.Printf("Current stack trace:\n%s\n", stackTrace)
-			fmt.Printf("========================\n\n")
+			if m.lastLockHolder != lockCaller {
+				fmt.Printf("\n=== LOCK WAIT TIMEOUT WARNING ===\n")
+				fmt.Printf("Waiting for mutex lock for %v\n", waitDuration)
+				fmt.Printf("Caller: %s\n", lockCaller)
+				fmt.Printf("Last lock holder: %s\n", m.lastLockHolder)
+				fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+				fmt.Printf("Current stack trace:\n%s", filterStack(stackTrace))
+				fmt.Printf("========================\n\n")
+			} else {
+				fmt.Printf("\n=== LONG LOCK HOLD WARNING ===\n")
+				fmt.Printf("Still waiting in mutex lock for %v\n", waitDuration)
+				fmt.Printf("Too long lock holder: %s\n", m.lastLockHolder)
+				fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+				fmt.Printf("========================\n\n")
+			}
 		}
 		m.debugMutex.Unlock()
 	}()
@@ -78,9 +86,38 @@ func (m *InstrumentedRWMutex) Lock() {
 	m.RWMutex.Lock()
 
 	m.debugMutex.Lock()
+
+	waitDuration := time.Since(waitStart)
+	if waitDuration > m.lockWaitTimeout {
+		fmt.Printf("\n=== LOCK ACQUIRED TOO SLOW ===\n")
+		fmt.Printf("Been waiting for mutex lock for %v\n", waitDuration)
+		fmt.Printf("Caller: %s\n", lockCaller)
+		fmt.Printf("Last lock holder: %s\n", m.lastLockHolder)
+		fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+		fmt.Printf("Current stack trace:\n%s", filterStack(stackTrace))
+		fmt.Printf("========================\n\n")
+	}
+
 	m.lastLockTime = time.Now()
 	m.lastLockHolder = getCallerInfo()
 	m.debugMutex.Unlock()
+}
+
+// Unlock releases an exclusive lock.
+// if the lock was held for too long, it prints a warning
+func (m *InstrumentedRWMutex) Unlock() {
+
+	waitDuration := time.Since(m.lastLockTime)
+	if waitDuration > m.lockWaitTimeout {
+		fmt.Printf("\n=== LOCK HELD TOO LONG! ===\n")
+		fmt.Printf("Been holding mutex lock for %v\n", waitDuration)
+		fmt.Printf("Caller: %s\n", m.lastLockHolder)
+		fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+		fmt.Printf("Current stack trace:\n%s", filterStack(debug.Stack()))
+		fmt.Printf("========================\n\n")
+	}
+
+	m.RWMutex.Unlock()
 }
 
 // RLock acquires a shared read lock and monitors the wait time.
