@@ -73,7 +73,7 @@ To run the included examples:
 go test -v -run=Example
 ```
 
-Or take a look at the example/main.go that demonstrates lock contention with multiple goroutines.
+Or take a look at the [examples/main.go](examples/main.go) that demonstrates lock contention with multiple goroutines.
 
 ```
 package main
