@@ -55,7 +55,7 @@ func TestRLockWarning(t *testing.T) {
 }
 
 func TestGetCallerInfo(t *testing.T) {
-	info := getCallerInfo()
+	info := getCallerInfo0()
 
 	// Verify it contains the test function name
 	if !strings.Contains(info, "TestGetCallerInfo") {

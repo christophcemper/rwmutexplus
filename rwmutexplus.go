@@ -65,7 +65,7 @@ func (m *InstrumentedRWMutex) Lock() {
 // If the wait exceeds lockWaitTimeout, it prints a warning with stack trace and lock holder information
 // If the lock is still held after lockWaitTimeout, it prints a warning that the lock is still held
 func (m *InstrumentedRWMutex) internalLock(purpose string) {
-	lockCaller := getCallerInfo()
+	lockCaller := getCallerInfo0()
 	waitStart := time.Now()
 	stackTrace := debug.Stack() // Capture stack trace BEFORE the goroutine
 
@@ -115,7 +115,7 @@ func (m *InstrumentedRWMutex) internalLock(purpose string) {
 	}
 
 	m.lastLockTime = time.Now()
-	m.lastLockHolder = getCallerInfo()
+	m.lastLockHolder = getCallerInfo0()
 	m.debugMutex.Unlock()
 }
 
@@ -204,7 +204,7 @@ func (m *InstrumentedRWMutex) RLock() {
 // // getCallerInfo returns the caller information for the function that called Lock or RLock.
 // // It skips the runtime, testing, and debug frames to focus on application code.
 // // except for tests where we want to see the test code in the stack trace
-// func getCallerInfo() string {
+// func getCallerInfo0() string {
 // 	var pcs [32]uintptr
 // 	n := runtime.Callers(0, pcs[:]) // Increase skip count to 3 to get past runtime frames
 // 	frames := runtime.CallersFrames(pcs[:n])

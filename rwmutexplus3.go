@@ -48,14 +48,18 @@ type RWMutexPlus struct {
 	// 4 = print ALL RWMutex info with every Debug Print of the current mutes using registry.DumpAllLockInfo().
 	//     WARNING: Leads to extreme log volume - ONLY needed for complex real time debugging scenarios
 	// 3 = print current RXMutex stats + info
-	// 2 = print only...
-	// 1 = print only...
+	// 2 = print only one line per lock action + stats
+	// 1 = print only one line per lock action
 	// 0 = print nothing extra
 	verboseLevel int
 	// DebugLevel controls debug logging (0 or 1)
 	debugLevel int
 	// callerInfoLines controls how many (useful) lines of caller stack info to include in logs
 	callerInfoLines int
+	// callerInfoSkip controls how many lines of caller stack info to skip in logs
+	callerInfoSkip int
+	// lastLogMessages tracks last logged messages to prevent duplicates
+	lastLogMessages sync.Map
 }
 
 func (rw *RWMutexPlus) setVerboseLevel(level int) int {
@@ -100,20 +104,18 @@ func (rw *RWMutexPlus) WithDebugLevel(level int) *RWMutexPlus {
 
 // check os.Getenv variables RWMUTEXTPLUS_VERBOSELEVEL and RWMUTEXTPLUS_DEBUGLEVEL to set the verboseLevel and debugLevel and override any defaults from the constructor code or With...Level setters
 func (rw *RWMutexPlus) OverrideVerboseLevelFromEnv() bool {
-	if verboseLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_VERBOSELEVEL", rw.verboseLevel); verboseLevel > 0 {
-		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_VERBOSELEVEL (%d)",
-			rw.name, rw.warningTimeout, verboseLevel), 1)
-		rw.setVerboseLevel(verboseLevel)
+	if verboseLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_VERBOSELEVEL", rw.verboseLevel); verboseLevel >= 0 {
+		rw.PrintOncef("\nENV: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_VERBOSELEVEL (%d)",
+			rw.name, rw.warningTimeout, rw.setVerboseLevel(verboseLevel))
 		return true
 	}
 	return false
 }
 
 func (rw *RWMutexPlus) OverrideDebugLevelFromEnv() bool {
-	if debugLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_DEBUGLEVEL", rw.debugLevel); debugLevel > 0 {
-		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_DEBUGLEVEL (%d)",
-			rw.name, rw.warningTimeout, debugLevel), 1)
-		rw.setDebugLevel(debugLevel)
+	if debugLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_DEBUGLEVEL", rw.debugLevel); debugLevel >= 0 {
+		rw.PrintOncef("\nENV: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_DEBUGLEVEL (%d)",
+			rw.name, rw.warningTimeout, rw.setDebugLevel(debugLevel))
 		return true
 	}
 	return false
@@ -121,8 +123,8 @@ func (rw *RWMutexPlus) OverrideDebugLevelFromEnv() bool {
 
 func (rw *RWMutexPlus) OverrideWarningTimeoutFromEnv() bool {
 	if timeout := GetDurationEnvOrDefault("RWMUTEXTPLUS_TIMEOUT", rw.warningTimeout); timeout > 0 {
-		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_TIMEOUT (%v)",
-			rw.name, rw.warningTimeout, timeout), 1)
+		rw.PrintOncef("\nENV: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_TIMEOUT (%v)",
+			rw.name, rw.warningTimeout, timeout)
 		rw.warningTimeout = timeout
 		return true
 	}
@@ -130,9 +132,30 @@ func (rw *RWMutexPlus) OverrideWarningTimeoutFromEnv() bool {
 }
 
 func (rw *RWMutexPlus) WithCallerInfoLines(lines int) *RWMutexPlus {
+	if override := rw.OverrideCallerInfoLinesFromEnv(); override {
+		return rw
+	}
 	rw.callerInfoLines = lines
 	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithCallerInfoLines (%d)", rw.name, rw.warningTimeout, lines), 1)
 	return rw
+}
+
+func (rw *RWMutexPlus) OverrideCallerInfoLinesFromEnv() bool {
+	if lines := GetIntEnvOrDefault("RWMUTEXTPLUS_CALLERINFOLINES", rw.callerInfoLines); lines >= 0 {
+		rw.PrintOncef("\nENV: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_CALLERINFOLINES (%d)", rw.name, rw.warningTimeout, lines)
+		rw.callerInfoLines = lines
+		return true
+	}
+	return false
+}
+
+func (rw *RWMutexPlus) OverrideCallerInfoSkipFromEnv() bool {
+	if skip := GetIntEnvOrDefault("RWMUTEXTPLUS_CALLERINFOSKIP", rw.callerInfoSkip); skip >= 0 {
+		rw.PrintOncef("\nENV: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_CALLERINFOSKIP (%d)", rw.name, rw.warningTimeout, skip)
+		rw.callerInfoSkip = skip
+		return true
+	}
+	return false
 }
 
 func NewRWMutexPlus(name string, warningTimeout time.Duration, logger *log.Logger) *RWMutexPlus {
@@ -151,11 +174,14 @@ func NewRWMutexPlus(name string, warningTimeout time.Duration, logger *log.Logge
 		verboseLevel:    1, // Default verbose level
 		debugLevel:      0, // Default debug level
 		callerInfoLines: 3, // Default number of lines of caller stack info to include in logs
+		callerInfoSkip:  0, // Default number of lines of caller stack info to skip in logs
 	}
 
 	mutex.OverrideVerboseLevelFromEnv()
 	mutex.OverrideDebugLevelFromEnv()
 	mutex.OverrideWarningTimeoutFromEnv()
+	mutex.OverrideCallerInfoLinesFromEnv()
+	mutex.OverrideCallerInfoSkipFromEnv()
 
 	// Register with global registry
 	globalRegistry.register(mutex)
@@ -195,7 +221,7 @@ func (rw *RWMutexPlus) getOrCreateStats(purpose string) *LockStats {
 func (rw *RWMutexPlus) logVerboseAction(action string, li LockInfo) {
 	str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
 	if rw.verboseLevel >= 3 || rw.debugLevel > 0 {
-		str += "\n" + li.GetCallerInfo()
+		str += li.GetCallerInfo()
 		rw.DebugPrintAllLockInfo(str)
 		return
 	}
@@ -213,21 +239,25 @@ func (rw *RWMutexPlus) logVerboseAction(action string, li LockInfo) {
 	default:
 		return
 	}
+
 }
 
 func (rw *RWMutexPlus) DebugPrintAllLockInfo(pos string) {
-	if rw.verboseLevel >= 2 && rw.debugLevel > 0 {
-		fmt.Println("================================")
-		fmt.Println(pos)
+	if rw.verboseLevel >= 2 || rw.debugLevel > 0 {
+
 		if rw.verboseLevel >= 3 {
+			fmt.Println("================================")
 			rw.PrintLockInfo(pos)
 			fmt.Println("--------------------------------")
 		}
 		if rw.verboseLevel >= 4 {
 			fmt.Println("-------- ALL RWMUTEXES ---------")
 			fmt.Println(DumpAllLockInfo())
+
 		}
-		fmt.Println("================================")
+		if rw.debugLevel >= 3 {
+			fmt.Println("================================")
+		}
 	}
 }
 
@@ -282,7 +312,7 @@ func (rw *RWMutexPlus) logTimeoutWarning(action string, lockInfo LockInfo, times
 func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 	defer ReleaseGoroutineID()
 	goroutineID := GetGoroutineID()
-	callerInfo := getCallerInfo(rw.callerInfoLines)
+	callerInfo := getCallerInfo(rw.callerInfoSkip, rw.callerInfoLines)
 	// Create lock request
 	request := &LockRequest{
 		lockType:    WriteLock,
@@ -385,7 +415,7 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 	defer ReleaseGoroutineID()
 	goroutineID := GetGoroutineID()
-	callerInfo := getCallerInfo(rw.callerInfoLines)
+	callerInfo := getCallerInfo(rw.callerInfoSkip, rw.callerInfoLines)
 
 	// Create lock request
 	request := &LockRequest{
@@ -507,7 +537,7 @@ func (rw *RWMutexPlus) Unlock() {
 		rw.logger.Printf("[%s] Active write locks: %+v", rw.name, rw.activeWrites)
 		rw.verboseLevel = 4
 		rw.debugLevel = 1
-		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo())
+		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo(rw.callerInfoSkip, rw.callerInfoLines))
 		return
 	}
 
@@ -551,7 +581,7 @@ func (rw *RWMutexPlus) RUnlock() {
 		rw.logger.Printf("[%s] ERROR: attempting to unlock an unlocked read mutex (goroutine %d)", rw.name, goroutineID)
 		rw.verboseLevel = 4
 		rw.debugLevel = 1
-		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo())
+		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo0())
 		return
 	}
 
@@ -785,30 +815,32 @@ func filterStack(stack []byte) string {
 	return strings.Join(filtered, "\n")
 }
 
+func getCallerInfo0() string {
+	return getCallerInfo(0, 3)
+}
+
 // getCallerInfo returns the caller information for the function that called Lock or RLock.
 // It skips the runtime, testing, and debug frames to focus on application code.
 // except for tests where we want to see the test code in the stack trace
-// optional numlines parameter controls how many lines to return
-func getCallerInfo(numLines ...int) string {
+// optional skip and numlines parameters control how many lines to skip and return
+func getCallerInfo(skip int, numLines int) string {
 
 	var pcs [32]uintptr
-	n := runtime.Callers(0, pcs[:]) // Increase skip count to 3 to get past runtime frames
+	n := runtime.Callers(skip, pcs[:])
 	frames := runtime.CallersFrames(pcs[:n])
 
 	// Get the first 3 non-runtime frames
 	callerInfo := ""
 	callerInfoLines := 0
-	keep := 3
-	if len(numLines) > 0 {
-		keep = numLines[0]
-	}
+	keep := numLines
+
 	for callerInfoLines <= keep {
 		frame, more := frames.Next()
 		if shouldIncludeLine(frame.File) {
 			// we want to the last part of the function name after the last /
 			funcName := strings.Split(frame.Function, "/")[len(strings.Split(frame.Function, "/"))-1]
 			// fileName := strings.Split(frame.File, "/")[len(strings.Split(frame.File, "/"))-1]
-			callerInfo1 := fmt.Sprintf("%s\n\t%s:%d %s", funcName, frame.File, frame.Line, funcName)
+			callerInfo1 := fmt.Sprintf("\n\t%s:%d -  %s", frame.File, frame.Line, funcName)
 			callerInfo = callerInfo + callerInfo1
 			callerInfoLines++
 		}
@@ -831,4 +863,12 @@ func GetIntEnvOrDefault(key string, defaultValue int) int {
 		}
 	}
 	return defaultValue
+}
+
+// PrintOncef prints a message if it hasn't been printed before
+func (rw *RWMutexPlus) PrintOncef(format string, args ...interface{}) {
+	msg := fmt.Sprintf(format, args...)
+	if PrintOnce(msg) {
+		rw.logger.Printf(msg)
+	}
 }
