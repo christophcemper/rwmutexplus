@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"runtime"
 	"runtime/debug"
-	"strings"
 	"sync"
 	"time"
 )
@@ -70,37 +69,38 @@ func (m *InstrumentedRWMutex) internalLock(purpose string) {
 	waitStart := time.Now()
 	stackTrace := debug.Stack() // Capture stack trace BEFORE the goroutine
 
-	go func() {
-		time.Sleep(m.lockWaitTimeout)
-		m.debugMutex.Lock()
+	// go func() {
+	// 	time.Sleep(m.lockWaitTimeout)
+	// 	m.debugMutex.Lock()
 
-		if m.lastLockTime.Add(m.lockWaitTimeout).Before(time.Now()) {
-			waitDuration := time.Since(waitStart)
-			if m.lastLockHolder != lockCaller {
-				fmt.Printf("\n=== LOCK WAIT TIMEOUT WARNING ===\n")
-				fmt.Printf("Waiting for mutex lock for %v\n", waitDuration)
-				fmt.Printf("Purpose: %s\n", purpose)
-				fmt.Printf("Caller: %s\n", lockCaller)
-				fmt.Printf("Last lock holder: %s\n", m.lastLockHolder)
-				fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
-				fmt.Printf("Current stack trace:\n%s", filterStack(stackTrace))
-				fmt.Printf("========================\n\n")
-			} else {
-				fmt.Printf("\n=== LONG LOCK HOLD WARNING ===\n")
-				fmt.Printf("Still waiting in mutex lock for %v\n", waitDuration)
-				fmt.Printf("Purpose: %s\n", purpose)
-				fmt.Printf("Too long lock holder: %s\n", m.lastLockHolder)
-				fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
-				fmt.Printf("Too long holder stack trace:\n%s", filterStack(stackTrace))
-				fmt.Printf("========================\n\n")
-			}
-		}
-		m.debugMutex.Unlock()
-	}()
+	// 	if m.lastLockTime.Add(m.lockWaitTimeout).Before(time.Now()) {
+	// 		waitDuration := time.Since(waitStart)
+	// 		if m.lastLockHolder != lockCaller {
+	// 			fmt.Printf("\n=== LOCK WAIT TIMEOUT WARNING ===\n")
+	// 			fmt.Printf("Waiting for mutex lock for %v\n", waitDuration)
+	// 			fmt.Printf("Purpose: %s\n", purpose)
+	// 			fmt.Printf("Caller: %s\n", lockCaller)
+	// 			fmt.Printf("Last lock holder: %s\n", m.lastLockHolder)
+	// 			fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+	// 			fmt.Printf("Current stack trace:\n%s", filterStack(stackTrace))
+	// 			fmt.Printf("========================\n\n")
+	// 		} else {
+	// 			fmt.Printf("\n=== LONG LOCK HOLD WARNING ===\n")
+	// 			fmt.Printf("Still waiting in mutex lock for %v\n", waitDuration)
+	// 			fmt.Printf("Purpose: %s\n", purpose)
+	// 			fmt.Printf("Too long lock holder: %s\n", m.lastLockHolder)
+	// 			fmt.Printf("Last lock time: %v ago\n", time.Since(m.lastLockTime))
+	// 			fmt.Printf("Too long holder stack trace:\n%s", filterStack(stackTrace))
+	// 			fmt.Printf("========================\n\n")
+	// 		}
+	// 	}
+	// 	m.debugMutex.Unlock()
+	// }()
+
+	m.debugMutex.Lock()
 
 	m.RWMutex.Lock()
 
-	m.debugMutex.Lock()
 	m.purpose = purpose
 	waitDuration := time.Since(waitStart)
 	if waitDuration > m.lockWaitTimeout {
@@ -170,57 +170,57 @@ func (m *InstrumentedRWMutex) RLock() {
 	close(done)
 }
 
-// shouldIncludeLine returns true if the line should be included in stack traces
-// and caller information, filtering out runtime, testing, and debug-related frames.
-func shouldIncludeLine(line string) bool {
+// // shouldIncludeLine returns true if the line should be included in stack traces
+// // and caller information, filtering out runtime, testing, and debug-related frames.
+// func shouldIncludeLine(line string) bool {
 
-	// we want to see the test code in the stack trace
-	if strings.Contains(line, "rwmutexplus_test.go") ||
-		strings.Contains(line, "rwmutexplus/examples") {
-		return true
-	}
-	return !strings.Contains(line, "runtime/") &&
-		!strings.Contains(line, "runtime.") &&
-		!strings.Contains(line, "testing/") &&
-		!strings.Contains(line, "testing.") &&
-		!strings.Contains(line, "rwmutexplus") &&
-		!strings.Contains(line, "debug.Stack") &&
-		!strings.Contains(line, "debug/stack")
-}
+// 	// we want to see the test code in the stack trace
+// 	if strings.Contains(line, "rwmutexplus_test.go") ||
+// 		strings.Contains(line, "rwmutexplus/examples") {
+// 		return true
+// 	}
+// 	return !strings.Contains(line, "runtime/") &&
+// 		!strings.Contains(line, "runtime.") &&
+// 		!strings.Contains(line, "testing/") &&
+// 		!strings.Contains(line, "testing.") &&
+// 		!strings.Contains(line, "rwmutexplus") &&
+// 		!strings.Contains(line, "debug.Stack") &&
+// 		!strings.Contains(line, "debug/stack")
+// }
 
-// filterStack removes unnecessary runtime and testing lines from stack traces
-// to make the output more readable and focused on application code.
-func filterStack(stack []byte) string {
-	lines := strings.Split(string(stack), "\n")
-	var filtered []string
-	for i, line := range lines {
-		if shouldIncludeLine(line) {
-			filtered = append(filtered, lines[i])
-		}
-	}
-	return strings.Join(filtered, "\n")
-}
+// // filterStack removes unnecessary runtime and testing lines from stack traces
+// // to make the output more readable and focused on application code.
+// func filterStack(stack []byte) string {
+// 	lines := strings.Split(string(stack), "\n")
+// 	var filtered []string
+// 	for i, line := range lines {
+// 		if shouldIncludeLine(line) {
+// 			filtered = append(filtered, lines[i])
+// 		}
+// 	}
+// 	return strings.Join(filtered, "\n")
+// }
 
-// getCallerInfo returns the caller information for the function that called Lock or RLock.
-// It skips the runtime, testing, and debug frames to focus on application code.
-// except for tests where we want to see the test code in the stack trace
-func getCallerInfo() string {
-	var pcs [32]uintptr
-	n := runtime.Callers(0, pcs[:]) // Increase skip count to 3 to get past runtime frames
-	frames := runtime.CallersFrames(pcs[:n])
+// // getCallerInfo returns the caller information for the function that called Lock or RLock.
+// // It skips the runtime, testing, and debug frames to focus on application code.
+// // except for tests where we want to see the test code in the stack trace
+// func getCallerInfo() string {
+// 	var pcs [32]uintptr
+// 	n := runtime.Callers(0, pcs[:]) // Increase skip count to 3 to get past runtime frames
+// 	frames := runtime.CallersFrames(pcs[:n])
 
-	// Get the first non-runtime frame
-	for {
-		frame, more := frames.Next()
-		if shouldIncludeLine(frame.File) {
-			// we want to the last part of the function name after the last /
-			funcName := strings.Split(frame.Function, "/")[len(strings.Split(frame.Function, "/"))-1]
-			// fileName := strings.Split(frame.File, "/")[len(strings.Split(frame.File, "/"))-1]
-			return fmt.Sprintf("%s\n\t%s:%d %s", funcName, frame.File, frame.Line, funcName)
-		}
-		if !more {
-			break
-		}
-	}
-	return "unknown"
-}
+// 	// Get the first non-runtime frame
+// 	for {
+// 		frame, more := frames.Next()
+// 		if shouldIncludeLine(frame.File) {
+// 			// we want to the last part of the function name after the last /
+// 			funcName := strings.Split(frame.Function, "/")[len(strings.Split(frame.Function, "/"))-1]
+// 			// fileName := strings.Split(frame.File, "/")[len(strings.Split(frame.File, "/"))-1]
+// 			return fmt.Sprintf("%s\n\t%s:%d %s", funcName, frame.File, frame.Line, funcName)
+// 		}
+// 		if !more {
+// 			break
+// 		}
+// 	}
+// 	return "unknown"
+// }
