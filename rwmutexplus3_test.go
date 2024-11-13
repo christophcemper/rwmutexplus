@@ -112,30 +112,6 @@ func TestRLockWithPurpose(t *testing.T) {
 	}
 }
 
-func TestUnlockPanic(t *testing.T) {
-	mutex := NewRWMutexPlus("test", 50*time.Millisecond, nil)
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Expected panic on unlock without lock")
-		}
-	}()
-
-	mutex.Unlock()
-}
-
-func TestRUnlockPanic(t *testing.T) {
-	mutex := NewRWMutexPlus("test", 50*time.Millisecond, nil)
-
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("Expected panic on RUnlock without RLock")
-		}
-	}()
-
-	mutex.RUnlock()
-}
-
 func TestGetPurposeStats(t *testing.T) {
 	mutex := NewRWMutexPlus("test", 50*time.Millisecond, nil)
 

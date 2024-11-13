@@ -374,11 +374,10 @@ func (rw *RWMutexPlus) Unlock() {
 	rw.internal.Unlock()
 
 	if !exists {
-		// Include more context in panic message
-		rw.logger.Printf("[%s] WARNING: No active write lock found for goroutine %d", rw.name, goroutineID)
+		// Replace panic with warning log and return
+		rw.logger.Printf("[%s] ERROR: No active write lock found for goroutine %d", rw.name, goroutineID)
 		rw.logger.Printf("[%s] Active write locks: %+v", rw.name, rw.activeWrites)
-		panic(fmt.Sprintf("[%s] attempting to unlock an unlocked write mutex (goroutine %d)",
-			rw.name, goroutineID))
+		return
 	}
 
 	// Now proceed with the actual unlock
@@ -415,7 +414,9 @@ func (rw *RWMutexPlus) RUnlock() {
 	activeLock, exists := rw.activeReads[goroutineID]
 	if !exists {
 		rw.internal.Unlock()
-		panic("attempting to unlock an unlocked read mutex")
+		// Replace panic with warning log and return
+		rw.logger.Printf("[%s] ERROR: attempting to unlock an unlocked read mutex (goroutine %d)", rw.name, goroutineID)
+		return
 	}
 
 	holdDuration := time.Since(activeLock.acquiredAt)
