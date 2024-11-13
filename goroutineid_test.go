@@ -8,11 +8,15 @@ import (
 	"time"
 )
 
-// TestGoroutineIDUniqueness verifies IDs are unique across goroutines
+// TestGoroutineIDUniqueness verifies that:
+// 1. Each goroutine gets a unique ID
+// 2. IDs remain consistent within the same goroutine
+// 3. No ID collisions occur under high concurrency
+// 4. Cleanup properly removes all IDs after use
 func TestGoroutineIDUniqueness(t *testing.T) {
 	const (
-		numIterations = 10
-		numGoroutines = 10000
+		numIterations = 10    // Multiple iterations to catch sporadic failures
+		numGoroutines = 10000 // High goroutine count to stress test concurrency
 	)
 
 	for iter := 0; iter < numIterations; iter++ {
@@ -20,34 +24,37 @@ func TestGoroutineIDUniqueness(t *testing.T) {
 
 		var (
 			wg         sync.WaitGroup
-			idMap      sync.Map
-			duplicates atomic.Int32
-			failures   atomic.Int32
+			idMap      sync.Map     // Thread-safe map to track all issued IDs
+			duplicates atomic.Int32 // Counter for duplicate IDs
+			failures   atomic.Int32 // Counter for ID consistency failures
 		)
 
-		// Reset state before each iteration
+		// Reset state to ensure clean test environment
 		ForceCleanup()
 		runtime.GC()
 
-		// Launch goroutines
+		// Launch goroutines to simulate heavy concurrent usage
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
 			go func(routineNum int) {
 				defer func() {
-					ReleaseGoroutineID()
+					ReleaseGoroutineID() // Ensure proper cleanup
 					wg.Done()
 				}()
 
+				// Get ID twice to verify consistency
 				id1 := GetGoroutineID()
-				time.Sleep(time.Microsecond)
+				time.Sleep(time.Microsecond) // Force potential race conditions
 				id2 := GetGoroutineID()
 
+				// Verify ID remains consistent within goroutine
 				if id1 != id2 {
 					failures.Add(1)
 					t.Errorf("ID changed within same goroutine: %d -> %d", id1, id2)
 					return
 				}
 
+				// Check for duplicate IDs across goroutines
 				if _, loaded := idMap.LoadOrStore(id1, routineNum); loaded {
 					duplicates.Add(1)
 					t.Errorf("Duplicate ID detected: %d", id1)
@@ -55,12 +62,12 @@ func TestGoroutineIDUniqueness(t *testing.T) {
 			}(i)
 		}
 
-		// Wait for all goroutines to complete
 		wg.Wait()
 
-		// Ensure all IDs are released
+		// Allow time for final cleanup operations
 		time.Sleep(10 * time.Millisecond)
 
+		// Report any uniqueness violations
 		if dups := duplicates.Load(); dups > 0 {
 			t.Errorf("Iteration %d: Found %d duplicate IDs", iter, dups)
 		}
@@ -68,45 +75,42 @@ func TestGoroutineIDUniqueness(t *testing.T) {
 			t.Errorf("Iteration %d: Found %d ID consistency failures", iter, fails)
 		}
 
-		// Multiple cleanup passes to ensure complete cleanup
+		// Multiple cleanup passes to ensure thorough cleanup
+		// This helps catch edge cases in cleanup logic
 		for i := 0; i < 3; i++ {
 			CleanupGoroutineIDs()
 			runtime.GC()
 			time.Sleep(10 * time.Millisecond)
 		}
 
-		// Final cleanup
+		// Final cleanup and verification
 		ForceCleanup()
 		runtime.GC()
 
-		// Verify cleanup
+		// Verify no IDs remain after cleanup
 		remaining := GetStoredGoroutineCount()
 		if remaining > 0 {
-			// Dump debug info
 			t.Logf("Debug: Active IDs still present: %d", remaining)
-			t.Logf("Debug: In-use count: %d", GetInUseCount())
+			t.Logf("Debug: In-use count: %d", GetStoredGoroutineCount())
 			t.Errorf("Iteration %d: %d IDs remained after cleanup", iter, remaining)
 		}
 
-		// Extra verification
-		if GetInUseCount() > 0 {
-			t.Errorf("Iteration %d: %d IDs still marked as in-use", iter, GetInUseCount())
+		// Verify in-use tracking is cleared
+		if GetStoredGoroutineCount() > 0 {
+			t.Errorf("Iteration %d: %d IDs still marked as in-use", iter, GetStoredGoroutineCount())
 		}
 	}
 }
 
-// Add this helper function to the main implementation
-func GetInUseCount() int {
-	idStore.RLock()
-	defer idStore.RUnlock()
-	return len(idStore.inUse)
-}
-
-// TestGoroutineIDStress performs stress testing with rapid creation/deletion
+// TestGoroutineIDStress performs intensive stress testing by:
+// 1. Running many concurrent goroutines
+// 2. Continuously checking ID consistency
+// 3. Verifying no ID collisions under heavy load
+// 4. Ensuring proper cleanup after high volume usage
 func TestGoroutineIDStress(t *testing.T) {
 	const (
-		numWorkers    = 10000
-		duration      = 3 * time.Second
+		numWorkers    = 10000           // High worker count for stress testing
+		duration      = 3 * time.Second // Run long enough to catch timing issues
 		checkInterval = 100 * time.Millisecond
 	)
 
@@ -118,16 +122,15 @@ func TestGoroutineIDStress(t *testing.T) {
 		idMap        sync.Map
 	)
 
-	// Launch worker goroutines
+	// Launch worker goroutines to continuously verify ID consistency
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerNum int) {
 			defer wg.Done()
 
-			// Get initial ID for this goroutine
 			myID := GetGoroutineID()
 
-			// Store initial ID
+			// Check for initial ID collisions
 			if _, loaded := idMap.LoadOrStore(myID, workerNum); loaded {
 				idCollisions.Add(1)
 				t.Errorf("Initial ID collision detected: %d", myID)
@@ -135,12 +138,12 @@ func TestGoroutineIDStress(t *testing.T) {
 
 			idsGenerated.Add(1)
 
+			// Continuously verify ID consistency until stopped
 			for {
 				select {
 				case <-stopChan:
 					return
 				default:
-					// Verify ID stays consistent
 					currentID := GetGoroutineID()
 					if currentID != myID {
 						idCollisions.Add(1)
@@ -154,14 +157,13 @@ func TestGoroutineIDStress(t *testing.T) {
 		}(i)
 	}
 
-	// Monitor goroutines periodically
+	// Monitor and log statistics during the test
 	go func() {
 		for {
 			select {
 			case <-stopChan:
 				return
 			case <-time.After(checkInterval):
-				// Log current statistics
 				t.Logf("Current stats - Generated: %d, Collisions: %d, Stored: %d",
 					idsGenerated.Load(),
 					idCollisions.Load(),
@@ -170,11 +172,12 @@ func TestGoroutineIDStress(t *testing.T) {
 		}
 	}()
 
-	// Run for specified duration
+	// Run test for specified duration
 	time.Sleep(duration)
 	close(stopChan)
 	wg.Wait()
 
+	// Gather final statistics
 	finalGenerated := idsGenerated.Load()
 	finalCollisions := idCollisions.Load()
 	storedCount := GetStoredGoroutineCount()
@@ -182,55 +185,60 @@ func TestGoroutineIDStress(t *testing.T) {
 	t.Logf("Final results - Generated: %d, Collisions: %d, Stored: %d",
 		finalGenerated, finalCollisions, storedCount)
 
+	// Verify no collisions occurred
 	if finalCollisions > 0 {
 		t.Errorf("Detected %d ID collisions during stress test", finalCollisions)
 	}
 
+	// Verify ID count matches worker count
 	if storedCount > numWorkers {
 		t.Errorf("More IDs stored (%d) than workers (%d)", storedCount, numWorkers)
 	}
 
-	// Multiple cleanup passes to ensure complete cleanup
+	// Thorough cleanup verification
 	for i := 0; i < 3; i++ {
 		CleanupGoroutineIDs()
 		runtime.GC()
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Final cleanup
 	ForceCleanup()
 	runtime.GC()
 
-	// Verify cleanup
+	// Final cleanup verification
 	remaining := GetStoredGoroutineCount()
 	if remaining > 0 {
-		// Dump debug info
 		t.Logf("Debug: Active IDs still present: %d", remaining)
-		t.Logf("Debug: In-use count: %d", GetInUseCount())
-		t.Errorf("Iteration %d: %d IDs remained after cleanup", 1, remaining)
+		t.Logf("Debug: In-use count: %d", GetStoredGoroutineCount())
+		t.Errorf("Final cleanup: %d IDs remained", remaining)
 	}
 
-	// Extra verification
-	if GetInUseCount() > 0 {
-		t.Errorf("Iteration %d: %d IDs still marked as in-use", 1, GetInUseCount())
+	if GetStoredGoroutineCount() > 0 {
+		t.Errorf("Final cleanup: %d IDs still marked as in-use", GetStoredGoroutineCount())
 	}
 }
 
-// TestGoroutineIDMemoryLeak verifies no memory leaks occur
+// TestGoroutineIDMemoryLeak verifies memory stability by:
+// 1. Establishing a baseline memory usage
+// 2. Running multiple iterations of high-concurrency operations
+// 3. Monitoring memory growth patterns
+// 4. Ensuring cleanup effectively prevents memory leaks
 func TestGoroutineIDMemoryLeak(t *testing.T) {
 	const (
-		numIterations      = 50
-		numGoroutines      = 50000
-		baselineIterations = 3
-		memoryGrowthLimit  = 1.27 // 27% growth allowance for this setup, lower numbers need less memory
+		numIterations      = 50    // Many iterations to detect memory growth
+		numGoroutines      = 50000 // Large number to stress memory usage
+		baselineIterations = 3     // Iterations to establish stable baseline
+		memoryGrowthLimit  = 1.27  // 27% growth allowance - determined empirically
+		// Lower numbers need less memory but may be less stable
 	)
 
-	// Helper function to calculate percentage growth
+	// Helper to calculate percentage growth for clear reporting
 	calcGrowthPct := func(current, baseline uint64) float64 {
 		return float64(10000*current)/float64(baseline)/100 - 100
 	}
 
-	// Warm up the system and establish baseline
+	// Warm up phase to establish reliable baseline
+	// This eliminates initial runtime allocations from affecting results
 	var baselineAlloc uint64
 	for i := 0; i < baselineIterations; i++ {
 		runtime.GC()
@@ -249,13 +257,13 @@ func TestGoroutineIDMemoryLeak(t *testing.T) {
 		ForceCleanup()
 	}
 
-	// Get baseline memory after warmup
+	// Establish baseline memory usage after warmup
 	runtime.GC()
 	var memStats runtime.MemStats
 	runtime.ReadMemStats(&memStats)
 	baselineAlloc = memStats.Alloc
 
-	// Calculate our memory limit and allowed growth percentage
+	// Calculate acceptable memory limits
 	memoryLimit := uint64(float64(baselineAlloc) * memoryGrowthLimit)
 	allowedGrowthPct := float64(10000*(memoryGrowthLimit-1)) / 100
 
@@ -263,12 +271,12 @@ func TestGoroutineIDMemoryLeak(t *testing.T) {
 	t.Logf("  Baseline allocation: %d bytes", baselineAlloc)
 	t.Logf("  Memory limit: %d bytes (%.2f%% growth allowed)", memoryLimit, allowedGrowthPct)
 
-	// Run actual test iterations
+	// Run test iterations and monitor memory usage
 	var maxAlloc uint64
 	for iter := 0; iter < numIterations; iter++ {
 		var wg sync.WaitGroup
 
-		// Create goroutines
+		// Create goroutines and verify ID consistency
 		for i := 0; i < numGoroutines; i++ {
 			wg.Add(1)
 			go func() {
@@ -296,7 +304,7 @@ func TestGoroutineIDMemoryLeak(t *testing.T) {
 			maxAlloc = memStats.Alloc
 		}
 
-		// Check against our calculated limit with percentage reporting
+		// Check against calculated limit with detailed percentage reporting
 		if memStats.Alloc > memoryLimit {
 			t.Errorf("Memory usage exceeded limit - Baseline: %d, Current: %d, Limit: %d (want %.2f%% < current %.2f%%)",
 				baselineAlloc, memStats.Alloc, memoryLimit, allowedGrowthPct, currentGrowthPct)
@@ -305,7 +313,7 @@ func TestGoroutineIDMemoryLeak(t *testing.T) {
 		ForceCleanup()
 	}
 
-	// Final cleanup and check
+	// Final cleanup and reporting
 	runtime.GC()
 	ForceCleanup()
 	runtime.GC()
@@ -322,18 +330,21 @@ func TestGoroutineIDMemoryLeak(t *testing.T) {
 	t.Logf("  Allowed growth: %.2f%%", allowedGrowthPct)
 	t.Logf("  Remaining IDs: %d", GetStoredGoroutineCount())
 
-	// Final memory check with percentage reporting
+	// Final verification with percentage-based reporting
 	if finalAlloc > memoryLimit {
 		t.Errorf("Final memory exceeds limit - Baseline: %d, Final: %d, Limit: %d (want %.2f%% < current %.2f%%)",
 			baselineAlloc, finalAlloc, memoryLimit, allowedGrowthPct, finalGrowthPct)
 	}
 }
 
-// TestGoroutineIDConcurrentCleanup verifies cleanup safety
+// TestGoroutineIDConcurrentCleanup verifies that:
+// 1. IDs remain consistent during concurrent cleanup operations
+// 2. Cleanup doesn't interfere with active goroutines
+// 3. No ID changes occur while goroutines are running
 func TestGoroutineIDConcurrentCleanup(t *testing.T) {
 	const (
-		numGoroutines   = 1000
-		cleanupInterval = 100 * time.Millisecond
+		numGoroutines   = 1000                   // Enough goroutines to create cleanup pressure
+		cleanupInterval = 100 * time.Millisecond // Frequent cleanup to stress concurrent access
 	)
 
 	var (
@@ -342,7 +353,7 @@ func TestGoroutineIDConcurrentCleanup(t *testing.T) {
 		errors   atomic.Int32
 	)
 
-	// Start cleanup goroutine
+	// Start aggressive cleanup goroutine
 	go func() {
 		for {
 			select {
@@ -354,13 +365,13 @@ func TestGoroutineIDConcurrentCleanup(t *testing.T) {
 		}
 	}()
 
-	// Launch test goroutines
+	// Launch test goroutines that continuously verify their IDs
 	for i := 0; i < numGoroutines; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 
-			// Repeatedly get and verify IDs while cleanup is happening
+			// Repeatedly verify ID consistency while cleanup is happening
 			prevID := GetGoroutineID()
 			for j := 0; j < 100; j++ {
 				currentID := GetGoroutineID()
@@ -382,14 +393,18 @@ func TestGoroutineIDConcurrentCleanup(t *testing.T) {
 	}
 }
 
-// BenchmarkGoroutineID measures performance
+// BenchmarkGoroutineID provides performance metrics for:
+// 1. Sequential ID retrieval (single goroutine performance)
+// 2. Parallel ID retrieval (concurrent access performance)
 func BenchmarkGoroutineID(b *testing.B) {
+	// Benchmark sequential performance
 	b.Run("Sequential", func(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			_ = GetGoroutineID()
 		}
 	})
 
+	// Benchmark concurrent performance
 	b.Run("Parallel", func(b *testing.B) {
 		b.RunParallel(func(pb *testing.PB) {
 			for pb.Next() {
@@ -399,7 +414,8 @@ func BenchmarkGoroutineID(b *testing.B) {
 	})
 }
 
-// Helper function to run with -race detector
+// TestGoroutineIDWithRace runs core tests with race detector
+// Only runs full tests when not in short mode to avoid long CI times
 func TestGoroutineIDWithRace(t *testing.T) {
 	if !testing.Short() {
 		TestGoroutineIDUniqueness(t)

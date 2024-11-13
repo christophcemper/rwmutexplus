@@ -1,12 +1,20 @@
-TESTFLAGS=-v -race -count=1 -timeout=360s
+TESTFLAGS1=-race -count=1 -timeout=360s
+TESTFLAGS=$(TESTFLAGS1)
 
 # so far only testgoroutineid is implemented 100% PASS, but others can run, too
 test: testgoroutineid
+
+testv: 
+	$(MAKE) testgoroutineid TESTFLAGS="-v $(TESTFLAGS1)"
 
 test2: testall
 
 testall:
 	go test $(TESTFLAGS)
+
+testallv:
+	go test $(TESTFLAGS) -v
+
 
 .PHONY: test testunique testleak testall testgoroutineid
 
@@ -32,4 +40,9 @@ testcleanup:
 
 testrace:
 	go test $(TESTFLAGS) -run TestGoroutineIDWithRace
-	
+
+#benchmarks of a core lib like goroutineid are important
+benchmark: benchmarkgoroutineid
+
+benchmarkgoroutineid:
+	go test -benchmem -run="^$$" -bench="^BenchmarkGoroutineID$$" $(TESTFLAGS)

@@ -9,35 +9,46 @@ import (
 )
 
 var (
+	// Global counter ensures unique IDs even if hash collisions occur
 	goroutineCounter atomic.Uint64
-	bufferPool       = sync.Pool{
+
+	// Pool of reusable buffers to minimize allocations during stack trace capture
+	// Uses pointer to slice to prevent copying and reduce allocations
+	bufferPool = sync.Pool{
 		New: func() interface{} {
 			b := make([]byte, 64)
-			return &b
+			return &b // Return pointer to prevent slice copying
 		},
 	}
 
-	// Main storage with RWMutex for better concurrency
+	// Thread-safe storage for goroutine IDs with separate tracking of active IDs
+	// Split design allows quick release without full cleanup
 	idStore struct {
 		sync.RWMutex
-		ids   map[[8]byte]uint64
-		inUse map[[8]byte]struct{} // Track actively used IDs
+		ids   map[[8]byte]uint64   // Maps hash of goroutine stack to unique ID
+		inUse map[[8]byte]struct{} // Tracks which IDs are currently active
 	}
 )
 
 func init() {
+	// Pre-allocate maps with reasonable capacity to reduce resizing
+	// 1024 is chosen as a balance between memory usage and resize frequency
 	idStore.ids = make(map[[8]byte]uint64, 1024)
 	idStore.inUse = make(map[[8]byte]struct{}, 1024)
 }
 
 // GetGoroutineID returns a unique identifier for the current goroutine
+// Uses a two-phase locking strategy to optimize for the common case
+// where the ID already exists
 func GetGoroutineID() uint64 {
 	key := getGoRoutineKey()
 
-	// Fast path with read lock
+	// Fast path: Check if ID exists with read lock
+	// This optimizes for the common case where goroutines
+	// request their ID multiple times
 	idStore.RLock()
 	if id, exists := idStore.ids[key]; exists {
-		// Mark as in use
+		// Need to mark as in-use, but must upgrade to write lock
 		idStore.RUnlock()
 		idStore.Lock()
 		idStore.inUse[key] = struct{}{}
@@ -46,17 +57,18 @@ func GetGoroutineID() uint64 {
 	}
 	idStore.RUnlock()
 
-	// Slow path with write lock
+	// Slow path: Create new ID with write lock
+	// Full lock needed for creating new IDs to maintain consistency
 	idStore.Lock()
 	defer idStore.Unlock()
 
-	// Double-check after acquiring write lock
+	// Double-check after acquiring write lock to handle race conditions
 	if id, exists := idStore.ids[key]; exists {
 		idStore.inUse[key] = struct{}{}
 		return id
 	}
 
-	// Create new ID
+	// Create new unique ID and store it
 	id := goroutineCounter.Add(1)
 	idStore.ids[key] = id
 	idStore.inUse[key] = struct{}{}
@@ -64,6 +76,7 @@ func GetGoroutineID() uint64 {
 }
 
 // ReleaseGoroutineID marks an ID as no longer in active use
+// This allows the cleanup routine to eventually remove it
 func ReleaseGoroutineID() {
 	key := getGoRoutineKey()
 	idStore.Lock()
@@ -71,83 +84,34 @@ func ReleaseGoroutineID() {
 	idStore.Unlock()
 }
 
+// getGoRoutineKey generates a fixed-size hash key from the goroutine's stack trace
+// Uses buffer pooling to minimize allocations during frequent calls
 func getGoRoutineKey() [8]byte {
+	// Get buffer from pool and ensure it's returned
 	buf := *(bufferPool.Get().(*[]byte))
 	defer bufferPool.Put(&buf)
 
+	// Capture minimal stack trace (just first line contains goroutine ID)
 	n := runtime.Stack(buf, false)
 	h := fnv.New64a()
 
+	// Hash only the first line which contains the goroutine ID
 	if idx := bytes.IndexByte(buf[:n], '\n'); idx > 0 {
 		h.Write(buf[:idx])
 	} else {
 		h.Write(buf[:n])
 	}
 
+	// Convert hash to fixed-size key
 	var key [8]byte
 	copy(key[:], h.Sum(nil))
 	return key
 }
 
-// // CleanupGoroutineIDs safely removes unused IDs
-// func CleanupGoroutineIDs() {
-// 	// Get all current goroutine stacks
-// 	buf := make([]byte, 102400)
-// 	n := runtime.Stack(buf, true)
-// 	currentStacks := buf[:n]
-
-// 	idStore.Lock()
-// 	defer idStore.Unlock()
-
-// 	// Create new maps
-// 	newIDs := make(map[[8]byte]uint64, len(idStore.ids))
-// 	newInUse := make(map[[8]byte]struct{}, len(idStore.inUse))
-
-// 	// First, copy all actively used IDs
-// 	for key := range idStore.inUse {
-// 		if id, exists := idStore.ids[key]; exists {
-// 			newIDs[key] = id
-// 			newInUse[key] = struct{}{}
-// 		}
-// 	}
-
-// 	// Then check for any other valid goroutines
-// 	for key, id := range idStore.ids {
-// 		keyBuf := *(bufferPool.Get().(*[]byte))
-// 		n := runtime.Stack(keyBuf, false)
-
-// 		if bytes.Contains(currentStacks, keyBuf[:n]) {
-// 			newIDs[key] = id
-// 		}
-
-// 		bufferPool.Put(&keyBuf)
-// 	}
-
-// 	// Atomic replacement
-// 	idStore.ids = newIDs
-// 	idStore.inUse = newInUse
-// }
-
-// GetStoredGoroutineCount returns count of stored IDs
-func GetStoredGoroutineCount() int {
-	idStore.RLock()
-	defer idStore.RUnlock()
-	return len(idStore.ids)
-}
-
-// ForceCleanup removes all IDs (for testing)
-func ForceCleanup() {
-	idStore.Lock()
-	defer idStore.Unlock()
-
-	// Completely new maps
-	idStore.ids = make(map[[8]byte]uint64, 1024)
-	idStore.inUse = make(map[[8]byte]struct{}, 1024)
-}
-
-// CleanupGoroutineIDs safely removes unused IDs
+// CleanupGoroutineIDs safely removes unused IDs while preserving active ones
+// Uses a complete map replacement strategy to prevent memory leaks
 func CleanupGoroutineIDs() {
-	// Get current goroutine stacks
+	// Large buffer for complete stack dump of all goroutines
 	buf := make([]byte, 102400)
 	n := runtime.Stack(buf, true)
 	currentStacks := buf[:n]
@@ -155,14 +119,15 @@ func CleanupGoroutineIDs() {
 	idStore.Lock()
 	defer idStore.Unlock()
 
-	// Only keep IDs that are either in use or belong to current goroutines
+	// Create new maps to prevent memory leaks from the old ones
+	// Fixed capacity helps prevent map growth
 	newIDs := make(map[[8]byte]uint64, 1024)
 	newInUse := make(map[[8]byte]struct{}, 1024)
 
+	// Only keep IDs that are both marked as in-use AND have a living goroutine
 	for key, id := range idStore.ids {
-		// Check if ID is in use
 		if _, inUse := idStore.inUse[key]; inUse {
-			// Verify the goroutine still exists
+			// Verify goroutine still exists
 			keyBuf := *(bufferPool.Get().(*[]byte))
 			n := runtime.Stack(keyBuf, false)
 			if bytes.Contains(currentStacks, keyBuf[:n]) {
@@ -173,7 +138,25 @@ func CleanupGoroutineIDs() {
 		}
 	}
 
-	// Replace with cleaned maps
+	// Atomic replacement of entire maps ensures consistency
 	idStore.ids = newIDs
 	idStore.inUse = newInUse
+}
+
+// GetStoredGoroutineCount returns number of stored IDs for monitoring
+func GetStoredGoroutineCount() int {
+	idStore.RLock()
+	defer idStore.RUnlock()
+	return len(idStore.ids)
+}
+
+// ForceCleanup removes all IDs for testing/reset purposes
+// Creates entirely new maps to ensure complete cleanup
+func ForceCleanup() {
+	idStore.Lock()
+	defer idStore.Unlock()
+
+	// Use fixed capacity to prevent growing beyond expected size
+	idStore.ids = make(map[[8]byte]uint64, 1024)
+	idStore.inUse = make(map[[8]byte]struct{}, 1024)
 }
