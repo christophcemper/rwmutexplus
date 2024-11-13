@@ -3,159 +3,14 @@ package rwmutexplus
 import (
 	"fmt"
 	"log"
+	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 )
-
-// LockRequest tracks an ongoing lock request
-
-type LockType int
-
-const (
-	ReadLock LockType = iota
-	WriteLock
-)
-
-// stringer for LockType
-func (lt LockType) String() string {
-	return []string{"ReadLock", "WriteLock"}[lt]
-}
-
-// create a common interface for both LockRequest and ActiveLock to store lockType, purpose, goRoutineID and callerInfo
-type LockInfo interface {
-	GetLockTX() LockTX
-	GetLockType() LockType
-	GetPurpose() string
-	GetGoroutineID() uint64
-	GetCallerInfo() string
-	GetSinceTime() time.Duration
-	GetPosition() string
-	String() string
-}
-
-// LockRequest implements LockInfo
-type LockRequest struct {
-	lockType    LockType
-	purpose     string
-	startTime   time.Time
-	goroutineID uint64
-	callerInfo  string
-}
-
-type LockTX int
-
-const (
-	IsLockRequest LockTX = iota
-	IsActiveLock
-)
-
-// stringer for LockObject
-func (lo LockTX) String() string {
-	return []string{"REQUEST", "ACTIVE"}[lo]
-}
-
-// implements LockObject
-func (lr *LockRequest) GetLockTX() LockTX {
-	return IsLockRequest
-}
-
-// implements LockInfo
-func (lr *LockRequest) GetLockType() LockType {
-	return lr.lockType
-}
-
-// implements LockInfo
-func (lr *LockRequest) GetPurpose() string {
-	return lr.purpose
-}
-
-// implements LockInfo
-func (lr *LockRequest) GetGoroutineID() uint64 {
-	return lr.goroutineID
-}
-
-// implements LockInfo
-func (lr *LockRequest) GetCallerInfo() string {
-	return lr.callerInfo
-}
-
-// implements LockInfo
-func (lr *LockRequest) GetSinceTime() time.Duration {
-	return time.Since(lr.startTime)
-}
-
-// stringer for LockRequest
-func (lr *LockRequest) GetPosition() string {
-	return fmt.Sprintf("for '%s' (goroutine %d)", lr.GetPurpose(), lr.GetGoroutineID())
-}
-
-// implements LockInfo
-func (lr *LockRequest) String() string {
-	return fmt.Sprintf("%s %s %s\n%s", lr.lockType, lr.GetLockTX(), lr.GetPosition(), lr.GetCallerInfo())
-}
-
-// ActiveLock tracks an acquired lockx
-type ActiveLock struct {
-	lockType        LockType
-	purpose         string
-	acquireWaitTime time.Duration
-	acquiredAt      time.Time
-	goroutineID     uint64
-	callerInfo      string
-	stack           string
-}
-
-// implements LockObject
-func (al *ActiveLock) GetLockTX() LockTX {
-	return IsActiveLock
-}
-
-// implements LockInfo
-func (al *ActiveLock) GetLockType() LockType {
-	return al.lockType
-}
-
-// implements LockInfo
-func (al *ActiveLock) GetPurpose() string {
-	return al.purpose
-}
-
-// implements LockInfo
-func (al *ActiveLock) GetGoroutineID() uint64 {
-	return al.goroutineID
-}
-
-// implements LockInfo
-func (al *ActiveLock) GetSinceTime() time.Duration {
-	return time.Since(al.acquiredAt)
-}
-
-// implements LockInfo
-func (lr *ActiveLock) GetCallerInfo() string {
-	return lr.callerInfo
-}
-
-// stringer for LockRequest
-func (lr *ActiveLock) GetPosition() string {
-	return fmt.Sprintf("for '%s' (goroutine %d)", lr.GetPurpose(), lr.GetGoroutineID())
-}
-
-// implements LockInfo
-func (al *ActiveLock) String() string {
-	return fmt.Sprintf("%s %s %s\n%s", al.lockType, al.GetLockTX(), al.GetPosition(), al.GetCallerInfo())
-}
-
-// stringer that can be used to print the lock info from LockInfo interface
-func PrintLockInfo(li LockInfo) {
-	fmt.Printf("%s %s for '%s' (goroutine %d)\n%s", li.GetLockTX(), li.GetLockType(), li.GetPurpose(), li.GetGoroutineID(), li.GetCallerInfo())
-}
-
-func GetLockInfo(li LockInfo) string {
-	return fmt.Sprintf("%s %s for '%s' (goroutine %d)\n%s", li.GetLockTX(), li.GetLockType(), li.GetPurpose(), li.GetGoroutineID(), li.GetCallerInfo())
-}
 
 // LockStats tracks statistics for a specific lock purpose
 type LockStats struct {
@@ -203,28 +58,65 @@ type RWMutexPlus struct {
 	callerInfoLines int
 }
 
-// WithVerboseLevel sets the verbose level (0-3) for the mutex and returns the mutex for chaining
-func (rw *RWMutexPlus) WithVerboseLevel(level int) *RWMutexPlus {
+func (rw *RWMutexPlus) setVerboseLevel(level int) int {
 	if level < 0 {
 		level = 0
 	} else if level > 4 {
 		level = 4
 	}
 	rw.verboseLevel = level
+	return level
+}
+
+// WithVerboseLevel sets the verbose level (0-3) for the mutex and returns the mutex for chaining
+func (rw *RWMutexPlus) WithVerboseLevel(level int) *RWMutexPlus {
+	if override := rw.OverrideVerboseLevelFromEnv(); override {
+		return rw
+	}
+	level = rw.setVerboseLevel(level)
 	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithVerboseLevel (%d)", rw.name, rw.warningTimeout, level), 1)
 	return rw
 }
 
-// WithDebugLevel sets the debug level (0-1) for the mutex and returns the mutex for chaining
-func (rw *RWMutexPlus) WithDebugLevel(level int) *RWMutexPlus {
+func (rw *RWMutexPlus) setDebugLevel(level int) int {
 	if level < 0 {
 		level = 0
 	} else if level > 1 {
 		level = 1
 	}
 	rw.debugLevel = level
+	return level
+}
+
+// WithDebugLevel sets the debug level (0-1) for the mutex and returns the mutex for chaining
+func (rw *RWMutexPlus) WithDebugLevel(level int) *RWMutexPlus {
+	if override := rw.OverrideDebugLevelFromEnv(); override {
+		return rw
+	}
+	level = rw.setDebugLevel(level)
 	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithDebugLevel (%d)", rw.name, rw.warningTimeout, level), 1)
 	return rw
+}
+
+// check os.Getenv variables RWMUTEXTPLUS_VERBOSELEVEL and RWMUTEXTPLUS_DEBUGLEVEL to set the verboseLevel and debugLevel and override any defaults from the constructor code or With...Level setters
+func (rw *RWMutexPlus) OverrideVerboseLevelFromEnv() bool {
+	if verboseLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_VERBOSELEVEL", rw.verboseLevel); verboseLevel > 0 {
+		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_VERBOSELEVEL (%d)",
+			rw.name, rw.warningTimeout, verboseLevel), 1)
+		rw.setVerboseLevel(verboseLevel)
+		return true
+	}
+	return false
+}
+
+func (rw *RWMutexPlus) OverrideDebugLevelFromEnv() bool {
+	if debugLevel := GetIntEnvOrDefault("RWMUTEXTPLUS_DEBUGLEVEL", rw.debugLevel); debugLevel > 0 {
+		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_DEBUGLEVEL (%d)",
+			rw.name, rw.warningTimeout, debugLevel), 1)
+		rw.setDebugLevel(debugLevel)
+		return true
+	}
+	return false
 }
 
 func (rw *RWMutexPlus) WithCallerInfoLines(lines int) *RWMutexPlus {
@@ -250,6 +142,9 @@ func NewRWMutexPlus(name string, warningTimeout time.Duration, logger *log.Logge
 		debugLevel:      0, // Default debug level
 		callerInfoLines: 3, // Default number of lines of caller stack info to include in logs
 	}
+
+	mutex.OverrideVerboseLevelFromEnv()
+	mutex.OverrideDebugLevelFromEnv()
 
 	// Register with global registry
 	globalRegistry.register(mutex)
@@ -285,19 +180,11 @@ func (rw *RWMutexPlus) getOrCreateStats(purpose string) *LockStats {
 	return stats
 }
 
-// // logVerboseAction logs detailed lock action information if verbosity requirements are met
-// func (rw *RWMutexPlus) logVerboseAction(lockAction string, purpose string, goroutineID uint64, callerInfo string) {
-// 	if rw.verboseLevel >= 3 || rw.debugLevel > 0 {
-// 		pos := fmt.Sprintf("purpose '%s' (goroutine %d, %s)", purpose, goroutineID, callerInfo)
-// 		str := fmt.Sprintf("[%s] %s for %s", rw.name, lockAction, pos)
-// 		rw.DebugPrintAllLockInfo(str)
-// 	}
-// }
-
 // logVerboseAction logs detailed lock action information if verbosity requirements are met
 func (rw *RWMutexPlus) logVerboseAction(action string, li LockInfo) {
+	str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
 	if rw.verboseLevel >= 3 || rw.debugLevel > 0 {
-		str := fmt.Sprintf("[%s] %s %s", rw.name, action, li.String())
+		str += "\n" + li.GetCallerInfo()
 		rw.DebugPrintAllLockInfo(str)
 		return
 	}
@@ -305,12 +192,11 @@ func (rw *RWMutexPlus) logVerboseAction(action string, li LockInfo) {
 	switch rw.verboseLevel {
 	case 2:
 		{
-			str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
+			rw.logger.Printf("%s", str)
 			rw.PrintLockInfo(str)
 		}
 	case 1:
 		{
-			str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
 			rw.logger.Printf("%s", str)
 		}
 	default:
@@ -505,7 +391,7 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 	rw.internal.Unlock()
 
 	// Before attempting lock:
-	rw.logTimeoutWarning("REQUEST", request)
+	rw.logTimeoutWarning("WAIT FOR", request)
 
 	// Start lock acquisition
 	lockChan := make(chan struct{})
@@ -528,7 +414,7 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 		// waitTime := time.Since(req.startTime)
 		timesWarning++
 		// rw.logTimeoutWarning2(waitTime, "REQUEST "+req.lockType.String(), req.String(), timesWarning)
-		rw.logTimeoutWarning("REQUEST", req, timesWarning)
+		rw.logTimeoutWarning("WAIT FOR", req, timesWarning)
 
 		// Wait for actual acquisition
 		<-lockChan
@@ -924,4 +810,14 @@ func getCallerInfo(numLines ...int) string {
 		callerInfo = "unknown"
 	}
 	return callerInfo
+}
+
+// GetIntEnvOrDefault returns the integer value of an environment variable or the default value if not set
+func GetIntEnvOrDefault(key string, defaultValue int) int {
+	if val := os.Getenv(key); val != "" {
+		if intVal, err := strconv.Atoi(val); err == nil {
+			return intVal
+		}
+	}
+	return defaultValue
 }
