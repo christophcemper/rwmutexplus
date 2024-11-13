@@ -23,7 +23,7 @@ func main() {
 		"main mutex",
 		100*time.Millisecond,
 		nil,
-	).WithDebugLevel(1).WithVerboseLevel(3)
+	).WithDebugLevel(0).WithVerboseLevel(0).WithCallerInfoLines(5)
 
 	mutex.PrintLockInfo("pos1")
 
@@ -54,7 +54,9 @@ func main() {
 	mutex.Unlock()
 	fmt.Printf("Main Lock released\n")
 
-	mutex.PrintLockInfo("pos4")
+	mutex.PrintLockInfo("back to main - pos4")
+
+	mutex.DebugPrintAllLockInfo("back to main - pos5")
 
 	// Wait for goroutines to complete
 	time.Sleep(1 * time.Second)

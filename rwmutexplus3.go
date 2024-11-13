@@ -11,38 +11,169 @@ import (
 )
 
 // LockRequest tracks an ongoing lock request
+
+type LockType int
+
+const (
+	ReadLock LockType = iota
+	WriteLock
+)
+
+// stringer for LockType
+func (lt LockType) String() string {
+	return []string{"ReadLock", "WriteLock"}[lt]
+}
+
+// create a common interface for both LockRequest and ActiveLock to store lockType, purpose, goRoutineID and callerInfo
+type LockInfo interface {
+	GetLockTX() LockTX
+	GetLockType() LockType
+	GetPurpose() string
+	GetGoroutineID() uint64
+	GetCallerInfo() string
+	GetSinceTime() time.Duration
+	GetPosition() string
+	String() string
+}
+
+// LockRequest implements LockInfo
 type LockRequest struct {
+	lockType    LockType
 	purpose     string
 	startTime   time.Time
 	goroutineID uint64
 	callerInfo  string
 }
 
-// ActiveLock tracks an acquired lock
+type LockTX int
+
+const (
+	IsLockRequest LockTX = iota
+	IsActiveLock
+)
+
+// stringer for LockObject
+func (lo LockTX) String() string {
+	return []string{"REQUEST", "ACTIVE"}[lo]
+}
+
+// implements LockObject
+func (lr *LockRequest) GetLockTX() LockTX {
+	return IsLockRequest
+}
+
+// implements LockInfo
+func (lr *LockRequest) GetLockType() LockType {
+	return lr.lockType
+}
+
+// implements LockInfo
+func (lr *LockRequest) GetPurpose() string {
+	return lr.purpose
+}
+
+// implements LockInfo
+func (lr *LockRequest) GetGoroutineID() uint64 {
+	return lr.goroutineID
+}
+
+// implements LockInfo
+func (lr *LockRequest) GetCallerInfo() string {
+	return lr.callerInfo
+}
+
+// implements LockInfo
+func (lr *LockRequest) GetSinceTime() time.Duration {
+	return time.Since(lr.startTime)
+}
+
+// stringer for LockRequest
+func (lr *LockRequest) GetPosition() string {
+	return fmt.Sprintf("for '%s' (goroutine %d)", lr.GetPurpose(), lr.GetGoroutineID())
+}
+
+// implements LockInfo
+func (lr *LockRequest) String() string {
+	return fmt.Sprintf("%s %s %s\n%s", lr.lockType, lr.GetLockTX(), lr.GetPosition(), lr.GetCallerInfo())
+}
+
+// ActiveLock tracks an acquired lockx
 type ActiveLock struct {
-	purpose     string
-	acquiredAt  time.Time
-	goroutineID uint64
-	callerInfo  string
-	stack       string
+	lockType        LockType
+	purpose         string
+	acquireWaitTime time.Duration
+	acquiredAt      time.Time
+	goroutineID     uint64
+	callerInfo      string
+	stack           string
+}
+
+// implements LockObject
+func (al *ActiveLock) GetLockTX() LockTX {
+	return IsActiveLock
+}
+
+// implements LockInfo
+func (al *ActiveLock) GetLockType() LockType {
+	return al.lockType
+}
+
+// implements LockInfo
+func (al *ActiveLock) GetPurpose() string {
+	return al.purpose
+}
+
+// implements LockInfo
+func (al *ActiveLock) GetGoroutineID() uint64 {
+	return al.goroutineID
+}
+
+// implements LockInfo
+func (al *ActiveLock) GetSinceTime() time.Duration {
+	return time.Since(al.acquiredAt)
+}
+
+// implements LockInfo
+func (lr *ActiveLock) GetCallerInfo() string {
+	return lr.callerInfo
+}
+
+// stringer for LockRequest
+func (lr *ActiveLock) GetPosition() string {
+	return fmt.Sprintf("for '%s' (goroutine %d)", lr.GetPurpose(), lr.GetGoroutineID())
+}
+
+// implements LockInfo
+func (al *ActiveLock) String() string {
+	return fmt.Sprintf("%s %s %s\n%s", al.lockType, al.GetLockTX(), al.GetPosition(), al.GetCallerInfo())
+}
+
+// stringer that can be used to print the lock info from LockInfo interface
+func PrintLockInfo(li LockInfo) {
+	fmt.Printf("%s %s for '%s' (goroutine %d)\n%s", li.GetLockTX(), li.GetLockType(), li.GetPurpose(), li.GetGoroutineID(), li.GetCallerInfo())
+}
+
+func GetLockInfo(li LockInfo) string {
+	return fmt.Sprintf("%s %s for '%s' (goroutine %d)\n%s", li.GetLockTX(), li.GetLockType(), li.GetPurpose(), li.GetGoroutineID(), li.GetCallerInfo())
 }
 
 // LockStats tracks statistics for a specific lock purpose
 type LockStats struct {
-	totalAcquired    atomic.Int64
-	totalContentions atomic.Int64
-	totalTimeHeld    atomic.Int64 // in nanoseconds
-	maxTimeHeld      atomic.Int64 // in nanoseconds
-	totalWaitTime    atomic.Int64 // in nanoseconds
-	totalWaitEvents  atomic.Int64
-	maxWaitTime      atomic.Int64 // in nanoseconds
+	totalAcquired          atomic.Int64
+	totalTimeoutsReadLock  atomic.Int64
+	totalTimeoutsWriteLock atomic.Int64
+	totalTimeHeld          atomic.Int64 // in nanoseconds
+	maxTimeHeld            atomic.Int64 // in nanoseconds
+	totalWaitTime          atomic.Int64 // in nanoseconds
+	totalWaitEvents        atomic.Int64
+	maxWaitTime            atomic.Int64 // in nanoseconds
 }
 
 // RWMutexPlus provides a robust logging RWMutex implementation
 type RWMutexPlus struct {
 	sync.RWMutex
 	name           string
-	warningTimeout time.Duration
+	warningTimeout time.Duration // CFG
 	logger         *log.Logger
 
 	// Protected by internal mutex
@@ -54,23 +185,33 @@ type RWMutexPlus struct {
 	purposeStats  map[string]*LockStats   // Statistics per purpose
 
 	// Atomic counters
-	activeReaders   atomic.Int32
-	contentionCount atomic.Int64
+	activeReaders     atomic.Int32
+	timeoutsReadLock  atomic.Int64
+	timeoutsWriteLock atomic.Int64
 
-	// VerboseLevel controls the verbosity of logging (0-3)
+	// VerboseLevel controls the verbosity of logging (0-4)
+	// 4 = print ALL RWMutex info with every Debug Print of the current mutes using registry.DumpAllLockInfo().
+	//     WARNING: Leads to extreme log volume - ONLY needed for complex real time debugging scenarios
+	// 3 = print current RXMutex stats + info
+	// 2 = print only...
+	// 1 = print only...
+	// 0 = print nothing extra
 	verboseLevel int
 	// DebugLevel controls debug logging (0 or 1)
 	debugLevel int
+	// callerInfoLines controls how many (useful) lines of caller stack info to include in logs
+	callerInfoLines int
 }
 
 // WithVerboseLevel sets the verbose level (0-3) for the mutex and returns the mutex for chaining
 func (rw *RWMutexPlus) WithVerboseLevel(level int) *RWMutexPlus {
 	if level < 0 {
 		level = 0
-	} else if level > 3 {
-		level = 3
+	} else if level > 4 {
+		level = 4
 	}
 	rw.verboseLevel = level
+	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithVerboseLevel (%d)", rw.name, rw.warningTimeout, level), 1)
 	return rw
 }
 
@@ -82,25 +223,32 @@ func (rw *RWMutexPlus) WithDebugLevel(level int) *RWMutexPlus {
 		level = 1
 	}
 	rw.debugLevel = level
+	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithDebugLevel (%d)", rw.name, rw.warningTimeout, level), 1)
+	return rw
+}
+
+func (rw *RWMutexPlus) WithCallerInfoLines(lines int) *RWMutexPlus {
+	rw.callerInfoLines = lines
+	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithCallerInfoLines (%d)", rw.name, rw.warningTimeout, lines), 1)
 	return rw
 }
 
 func NewRWMutexPlus(name string, warningTimeout time.Duration, logger *log.Logger) *RWMutexPlus {
-	fmt.Printf("\n\nDEBUG: NewRWMutexPlus (%s, %v)\n", name, warningTimeout)
 	if logger == nil {
 		logger = log.Default()
 	}
 	mutex := &RWMutexPlus{
-		name:           name,
-		warningTimeout: warningTimeout,
-		logger:         logger,
-		pendingWrites:  make(map[uint64]*LockRequest),
-		pendingReads:   make(map[uint64]*LockRequest),
-		activeWrites:   make(map[uint64]*ActiveLock),
-		activeReads:    make(map[uint64]*ActiveLock),
-		purposeStats:   make(map[string]*LockStats),
-		verboseLevel:   1, // Default verbose level
-		debugLevel:     0, // Default debug level
+		name:            name,
+		warningTimeout:  warningTimeout,
+		logger:          logger,
+		pendingWrites:   make(map[uint64]*LockRequest),
+		pendingReads:    make(map[uint64]*LockRequest),
+		activeWrites:    make(map[uint64]*ActiveLock),
+		activeReads:     make(map[uint64]*ActiveLock),
+		purposeStats:    make(map[string]*LockStats),
+		verboseLevel:    1, // Default verbose level
+		debugLevel:      0, // Default debug level
+		callerInfoLines: 3, // Default number of lines of caller stack info to include in logs
 	}
 
 	// Register with global registry
@@ -137,40 +285,110 @@ func (rw *RWMutexPlus) getOrCreateStats(purpose string) *LockStats {
 	return stats
 }
 
+// // logVerboseAction logs detailed lock action information if verbosity requirements are met
+// func (rw *RWMutexPlus) logVerboseAction(lockAction string, purpose string, goroutineID uint64, callerInfo string) {
+// 	if rw.verboseLevel >= 3 || rw.debugLevel > 0 {
+// 		pos := fmt.Sprintf("purpose '%s' (goroutine %d, %s)", purpose, goroutineID, callerInfo)
+// 		str := fmt.Sprintf("[%s] %s for %s", rw.name, lockAction, pos)
+// 		rw.DebugPrintAllLockInfo(str)
+// 	}
+// }
+
 // logVerboseAction logs detailed lock action information if verbosity requirements are met
-func (rw *RWMutexPlus) logVerboseAction(lockAction string, purpose string, goroutineID uint64, callerInfo string) {
-	if rw.verboseLevel >= 3 && rw.debugLevel > 0 {
-		pos := fmt.Sprintf("purpose '%s' (goroutine %d, %s)", purpose, goroutineID, callerInfo)
-		rw.logger.Printf("[%s] %s for %s", rw.name, lockAction, pos)
-		rw.PrintLockInfo(rw.name + " " + pos)
+func (rw *RWMutexPlus) logVerboseAction(action string, li LockInfo) {
+	if rw.verboseLevel >= 3 || rw.debugLevel > 0 {
+		str := fmt.Sprintf("[%s] %s %s", rw.name, action, li.String())
+		rw.DebugPrintAllLockInfo(str)
+		return
+	}
+
+	switch rw.verboseLevel {
+	case 2:
+		{
+			str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
+			rw.PrintLockInfo(str)
+		}
+	case 1:
+		{
+			str := fmt.Sprintf("[%s] %s %s %s for %s", rw.name, action, li.GetLockTX().String(), li.GetLockType().String(), li.GetPurpose())
+			rw.logger.Printf("%s", str)
+		}
+	default:
+		return
 	}
 }
 
-// logTimeoutWarning logs a warning if duration exceeds timeout, and optionally logs verbose action
-func (rw *RWMutexPlus) logTimeoutWarning(duration time.Duration, lockAction string, purpose string, goroutineID uint64, callerInfo string) {
-	if duration > rw.warningTimeout {
-		str := fmt.Sprintf("[%s] WARNING: %s for purpose '%s' took %v exceeding timeout of %v (goroutine %d, %s)",
-			rw.name, lockAction, purpose, duration, rw.warningTimeout, goroutineID, callerInfo)
-		fmt.Println("--------------------------------")
-		fmt.Println(str)
-		fmt.Println("--------------------------------")
-		rw.PrintLockInfo(str)
-		fmt.Println("--------------------------------")
-		fmt.Println("##### ALL RWMUTEXES ------------")
-		fmt.Println(DumpAllLockInfo())
-		fmt.Println("--------------------------------")
+func (rw *RWMutexPlus) DebugPrintAllLockInfo(pos string) {
+	if rw.verboseLevel >= 2 && rw.debugLevel > 0 {
+		fmt.Println("================================")
+		fmt.Println(pos)
+		if rw.verboseLevel >= 3 {
+			rw.PrintLockInfo(pos)
+			fmt.Println("--------------------------------")
+		}
+		if rw.verboseLevel >= 4 {
+			fmt.Println("-------- ALL RWMUTEXES ---------")
+			fmt.Println(DumpAllLockInfo())
+		}
+		fmt.Println("================================")
+	}
+}
+
+// DebugPrint prints the string if debug level is greater than 0
+// if variadic/optional param level is provided, it will print only if level is greater than or equal to debugLevel
+func (rw *RWMutexPlus) DebugPrint(str string, level ...int) {
+	if rw.debugLevel > 0 {
+		if len(level) > 0 && level[0] >= rw.debugLevel {
+			rw.logger.Printf("%s", str)
+		}
+	}
+}
+
+// we want to have rounded duration with units, i.e. 53ms instead of 53.23232ms
+func formatDuration(duration time.Duration) string {
+	durationStr := fmt.Sprintf("%v", duration)
+	durationStr = strings.Split(durationStr, ".")[0]
+	durationUnit := ""
+
+	return durationStr + durationUnit
+}
+
+// logTimeoutWarning logs a warning if duration exceeds timeout
+// and optionally logs verbose lockAction and whatLock
+// optional timesWarning is the number of times the warning has been logged
+func (rw *RWMutexPlus) logTimeoutWarning(action string, lockInfo LockInfo, timesWarning ...int) {
+
+	if duration := lockInfo.GetSinceTime(); duration > rw.warningTimeout {
+		lockAction := action + " " + lockInfo.GetLockTX().String() + " " + lockInfo.GetLockType().String()
+		timesExceeded1 := 1
+		// divide duration by warningTimeout to get number of times it has exceeded the timeout
+		if rw.warningTimeout > 0 {
+			timesExceeded1 = int(duration / rw.warningTimeout)
+		}
+		timesWarning1 := 1
+		if len(timesWarning) > 0 {
+			timesWarning1 = timesWarning[0]
+		}
+
+		str := fmt.Sprintf("[%s] WARNING #%d: %s took %s - %dx exceeding timeout of %v - %s",
+			rw.name, timesWarning1,
+			lockAction,
+			formatDuration(duration), timesExceeded1, rw.warningTimeout,
+			lockInfo.GetPosition())
+		rw.DebugPrintAllLockInfo(str)
 		rw.logger.Printf("%s", str)
-	} else if rw.verboseLevel >= 3 && rw.debugLevel > 0 {
-		rw.logVerboseAction(lockAction, purpose, goroutineID, callerInfo)
+	} else {
+		rw.logVerboseAction(action, lockInfo)
 	}
 }
 
 func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 	defer ReleaseGoroutineID()
 	goroutineID := GetGoroutineID()
-	callerInfo := getCallerInfo()
+	callerInfo := getCallerInfo(rw.callerInfoLines)
 	// Create lock request
 	request := &LockRequest{
+		lockType:    WriteLock,
 		purpose:     purpose,
 		startTime:   time.Now(),
 		goroutineID: goroutineID,
@@ -183,7 +401,7 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 	rw.internal.Unlock()
 
 	// Before attempting lock:
-	rw.logVerboseAction("Write lock requested", purpose, goroutineID, callerInfo)
+	rw.logTimeoutWarning("WAIT FOR", request)
 
 	// Start lock acquisition
 	lockChan := make(chan struct{})
@@ -192,6 +410,7 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 		close(lockChan)
 	}()
 
+	timesWarning := 0
 	// Wait with timeout
 	select {
 	case <-lockChan:
@@ -203,26 +422,32 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 		req := rw.pendingWrites[goroutineID]
 		rw.internal.Unlock()
 
-		waitTime := time.Since(req.startTime)
-		rw.logger.Printf("[%s] WARNING: Write lock for purpose '%s' taking %v to acquire (goroutine %d, %s)",
-			rw.name, purpose, waitTime, goroutineID, callerInfo)
+		// waitTime := time.Since(req.startTime)
+
+		// rw.logTimeoutWarning(waitTime, fmt.Sprintf("%s requested", req.lockType), purpose, goroutineID, callerInfo)
+		timesWarning++
+		// rw.logTimeoutWarning2(waitTime, "REQUEST "+req.lockType.String(), req.String(), timesWarning)
+		rw.logTimeoutWarning("WAIT FOR", req, timesWarning)
 
 		// Wait for actual acquisition
 		<-lockChan
 
 		// Update contention stats
 		stats := rw.getOrCreateStats(purpose)
-		stats.totalContentions.Add(1)
-		rw.contentionCount.Add(1)
+		stats.totalTimeoutsWriteLock.Add(1)
+		rw.timeoutsWriteLock.Add(1)
 	}
 
 	// Lock acquired - create active lock record
+	waitTime := time.Since(request.startTime)
 	activeLock := &ActiveLock{
-		purpose:     purpose,
-		acquiredAt:  time.Now(),
-		goroutineID: goroutineID,
-		callerInfo:  callerInfo,
-		stack:       captureStack(),
+		lockType:        WriteLock,
+		purpose:         purpose,
+		acquireWaitTime: waitTime,
+		acquiredAt:      time.Now(),
+		goroutineID:     goroutineID,
+		callerInfo:      callerInfo,
+		stack:           captureStack(),
 	}
 
 	// Update records
@@ -235,13 +460,15 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 	stats := rw.getOrCreateStats(purpose)
 	stats.totalAcquired.Add(1)
 
-	waitTime := time.Since(request.startTime)
-
 	// Update wait time stats
 	stats.totalWaitTime.Add(int64(waitTime))
 	stats.totalWaitEvents.Add(1)
 
-	rw.logTimeoutWarning(waitTime, "Write lock acquisition", purpose, goroutineID, callerInfo)
+	// rw.logTimeoutWarning(waitTime, fmt.Sprintf("%s aquired", activeLock.lockType), purpose, goroutineID, callerInfo)
+	// rw.logTimeoutWarning(waitTime, fmt.Sprintf("%s requested", req.lockType), purpose, goroutineID, callerInfo)
+	timesWarning++
+	// rw.logTimeoutWarning2(waitTime, "ACQUIRED", activeLock.String(), timesWarning)
+	rw.logTimeoutWarning("ACQUIRED", activeLock, timesWarning)
 
 	// Start monitoring
 	go rw.monitorWriteLock(goroutineID, activeLock)
@@ -259,11 +486,13 @@ func (rw *RWMutexPlus) LockWithPurpose(purpose string) {
 }
 
 func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
+	defer ReleaseGoroutineID()
 	goroutineID := GetGoroutineID()
-	callerInfo := getCallerInfo()
+	callerInfo := getCallerInfo(rw.callerInfoLines)
 
 	// Create lock request
 	request := &LockRequest{
+		lockType:    ReadLock,
 		purpose:     purpose,
 		startTime:   time.Now(),
 		goroutineID: goroutineID,
@@ -276,7 +505,7 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 	rw.internal.Unlock()
 
 	// Before attempting lock:
-	rw.logVerboseAction("Read lock requested", purpose, goroutineID, callerInfo)
+	rw.logTimeoutWarning("REQUEST", request)
 
 	// Start lock acquisition
 	lockChan := make(chan struct{})
@@ -285,6 +514,7 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 		close(lockChan)
 	}()
 
+	timesWarning := 0
 	// Wait with timeout
 	select {
 	case <-lockChan:
@@ -295,21 +525,23 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 		req := rw.pendingReads[goroutineID]
 		rw.internal.Unlock()
 
-		waitTime := time.Since(req.startTime)
-		rw.logger.Printf("[%s] WARNING: Read lock for purpose '%s' taking %v to acquire (goroutine %d, %s)",
-			rw.name, purpose, waitTime, goroutineID, callerInfo)
+		// waitTime := time.Since(req.startTime)
+		timesWarning++
+		// rw.logTimeoutWarning2(waitTime, "REQUEST "+req.lockType.String(), req.String(), timesWarning)
+		rw.logTimeoutWarning("REQUEST", req, timesWarning)
 
 		// Wait for actual acquisition
 		<-lockChan
 
 		// Update contention stats
 		stats := rw.getOrCreateStats(purpose)
-		stats.totalContentions.Add(1)
-		rw.contentionCount.Add(1)
+		stats.totalTimeoutsReadLock.Add(1)
+		rw.timeoutsReadLock.Add(1)
 	}
 
 	// Lock acquired - create active lock record
 	activeLock := &ActiveLock{
+		lockType:    ReadLock,
 		purpose:     purpose,
 		acquiredAt:  time.Now(),
 		goroutineID: goroutineID,
@@ -329,19 +561,18 @@ func (rw *RWMutexPlus) RLockWithPurpose(purpose string) {
 	rw.activeReaders.Add(1)
 
 	waitTime := time.Since(request.startTime)
-
 	// Update wait time stats
 	stats.totalWaitTime.Add(int64(waitTime))
 	stats.totalWaitEvents.Add(1)
 
-	rw.logTimeoutWarning(waitTime, "Read lock acquisition", purpose, goroutineID, callerInfo)
+	// rw.logTimeoutWarning(waitTime, "Read lock acquisition", purpose, goroutineID, callerInfo)
+	timesWarning++
+	// rw.logTimeoutWarning2(waitTime, "ACQUIRED "+activeLock.lockType.String(), activeLock.String(),
+
+	rw.logTimeoutWarning("ACQUIRED", activeLock, timesWarning)
 
 	// Start monitoring
 	go rw.monitorReadLock(goroutineID, activeLock)
-
-	// Update wait time stats
-	stats = rw.getOrCreateStats(purpose)
-	stats.totalWaitTime.Add(int64(waitTime))
 
 	// Update max wait time if needed
 	for {
@@ -377,6 +608,9 @@ func (rw *RWMutexPlus) Unlock() {
 		// Replace panic with warning log and return
 		rw.logger.Printf("[%s] ERROR: No active write lock found for goroutine %d", rw.name, goroutineID)
 		rw.logger.Printf("[%s] Active write locks: %+v", rw.name, rw.activeWrites)
+		rw.verboseLevel = 4
+		rw.debugLevel = 1
+		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo())
 		return
 	}
 
@@ -404,7 +638,9 @@ func (rw *RWMutexPlus) Unlock() {
 	// Actually unlock
 	rw.RWMutex.Unlock()
 
-	rw.logTimeoutWarning(holdDuration, "Write lock unlocked - held", activeLock.purpose, goroutineID, activeLock.callerInfo)
+	// rw.logTimeoutWarning2(holdDuration, "UNLOCKED ", activeLock.String())
+	rw.logTimeoutWarning("UNLOCK", activeLock)
+
 }
 
 func (rw *RWMutexPlus) RUnlock() {
@@ -416,6 +652,9 @@ func (rw *RWMutexPlus) RUnlock() {
 		rw.internal.Unlock()
 		// Replace panic with warning log and return
 		rw.logger.Printf("[%s] ERROR: attempting to unlock an unlocked read mutex (goroutine %d)", rw.name, goroutineID)
+		rw.verboseLevel = 4
+		rw.debugLevel = 1
+		rw.DebugPrintAllLockInfo(rw.name + " " + getCallerInfo())
 		return
 	}
 
@@ -439,7 +678,8 @@ func (rw *RWMutexPlus) RUnlock() {
 	rw.RWMutex.RUnlock()
 	rw.activeReaders.Add(-1)
 
-	rw.logTimeoutWarning(holdDuration, "Read lock unlocked - held", activeLock.purpose, goroutineID, activeLock.callerInfo)
+	// rw.logTimeoutWarning2(holdDuration, "UNLOCKED "+activeLock.lockType.String(), activeLock.String())
+	rw.logTimeoutWarning("UNLOCKED", activeLock)
 }
 
 func (rw *RWMutexPlus) monitorWriteLock(goroutineID uint64, lock *ActiveLock) {
@@ -454,18 +694,19 @@ func (rw *RWMutexPlus) monitorWriteLock(goroutineID uint64, lock *ActiveLock) {
 			return
 		}
 
-		holdDuration := time.Since(lock.acquiredAt)
+		// holdDuration := time.Since(lock.acquiredAt)
 		rw.internal.Unlock()
 
-		rw.logTimeoutWarning(holdDuration, "Write lock held", lock.purpose, goroutineID, lock.callerInfo)
+		// rw.logTimeoutWarning2(holdDuration, "HOLDING "+lock.lockType.String(), lock.String())
+		rw.logTimeoutWarning("HOLDING", lock)
 	}
 }
 
 func (rw *RWMutexPlus) monitorReadLock(goroutineID uint64, lock *ActiveLock) {
-	ticker := time.NewTicker(rw.warningTimeout)
-	defer ticker.Stop()
+	timesWarning := 0
+	for {
+		time.Sleep(rw.warningTimeout)
 
-	for range ticker.C {
 		rw.internal.Lock()
 		_, exists := rw.activeReads[goroutineID]
 		if !exists {
@@ -473,10 +714,16 @@ func (rw *RWMutexPlus) monitorReadLock(goroutineID uint64, lock *ActiveLock) {
 			return
 		}
 
-		holdDuration := time.Since(lock.acquiredAt)
+		// holdDuration := time.Since(lock.acquiredAt)
 		rw.internal.Unlock()
 
-		rw.logTimeoutWarning(holdDuration, "Read lock held", lock.purpose, goroutineID, lock.callerInfo)
+		timesWarning++
+		readCount := rw.activeReaders.Load()
+
+		stat := fmt.Sprintf("%s (%d readers)\n", lock.lockType.String(), readCount)
+
+		// rw.logTimeoutWarning2(holdDuration, "HOLDING "+stat, lock.String(), timesWarning)
+		rw.logTimeoutWarning("HOLDING "+stat, lock, timesWarning)
 	}
 }
 
@@ -488,13 +735,14 @@ func (rw *RWMutexPlus) GetPurposeStats() map[string]map[string]int64 {
 	stats := make(map[string]map[string]int64)
 	for purpose, purposeStats := range rw.purposeStats {
 		stats[purpose] = map[string]int64{
-			"total_acquired":    purposeStats.totalAcquired.Load(),
-			"total_contentions": purposeStats.totalContentions.Load(),
-			"total_time_held":   purposeStats.totalTimeHeld.Load(),
-			"max_time_held":     purposeStats.maxTimeHeld.Load(),
-			"total_wait_time":   purposeStats.totalWaitTime.Load(),
-			"total_wait_events": purposeStats.totalWaitEvents.Load(),
-			"max_wait_time":     purposeStats.maxWaitTime.Load(),
+			"total_acquired":            purposeStats.totalAcquired.Load(),
+			"total_timeouts_read_lock":  purposeStats.totalTimeoutsReadLock.Load(),
+			"total_timeouts_write_lock": purposeStats.totalTimeoutsWriteLock.Load(),
+			"total_time_held":           purposeStats.totalTimeHeld.Load(),
+			"max_time_held":             purposeStats.maxTimeHeld.Load(),
+			"total_wait_time":           purposeStats.totalWaitTime.Load(),
+			"total_wait_events":         purposeStats.totalWaitEvents.Load(),
+			"max_wait_time":             purposeStats.maxWaitTime.Load(),
 		}
 	}
 	return stats
@@ -584,21 +832,26 @@ func (m *RWMutexPlus) PrintLockInfo(pos string) {
 		len(activeLocks["read_locks"]), len(activeLocks["write_locks"]), activeLocks)
 	fmt.Printf("Pending Locks (Read: %d, Write: %d): %+v\n",
 		len(pendingLocks["pending_reads"]), len(pendingLocks["pending_writes"]), pendingLocks)
+	fmt.Printf("Active Readers: %d\n", m.activeReaders.Load())
+	fmt.Printf("Total Timeouts (Read: %d, Write: %d)\n",
+		m.timeoutsReadLock.Load(), m.timeoutsWriteLock.Load())
 
 	for purpose, stats := range purposeStats {
 		fmt.Printf("Purpose: %s\n", purpose)
 		fmt.Printf("  Total acquired: %d\n", stats["total_acquired"])
-		fmt.Printf("  Total contentions: %d\n", stats["total_contentions"])
+		fmt.Printf("  Total hold time: %v\n", time.Duration(stats["total_time_held"]))
+		fmt.Printf("  Total wait time: %v\n", time.Duration(stats["total_wait_time"]))
+		fmt.Printf("  Total wait events: %d\n", stats["total_wait_events"])
+		fmt.Printf("  Total timeouts read lock: %d\n", stats["total_timeouts_read_lock"])
+		fmt.Printf("  Total timeouts write lock: %d\n", stats["total_timeouts_write_lock"])
 		if stats["total_acquired"] > 0 {
 			fmt.Printf("  Average hold time: %v\n", time.Duration(stats["total_time_held"]/stats["total_acquired"]))
+			fmt.Printf("  Max hold time: %v\n", time.Duration(stats["max_time_held"]))
 		}
-		fmt.Printf("  Max hold time: %v\n", time.Duration(stats["max_time_held"]))
-		// if stats["total_wait_events"] > 0 {
-		fmt.Printf("  Total wait events: %d\n", stats["total_wait_events"])
-		// fmt.Printf("  Average wait time: %v\n", time.Duration(stats["total_wait_time"]/stats["total_wait_events"]))
-		fmt.Printf("  Total wait time: %v\n", time.Duration(stats["total_wait_time"]))
-		fmt.Printf("  Max wait time: %v\n", time.Duration(stats["max_wait_time"]))
-		// }
+		if stats["total_wait_events"] > 0 {
+			fmt.Printf("  Average wait time: %v\n", time.Duration(stats["total_wait_time"]/stats["total_wait_events"]))
+			fmt.Printf("  Max wait time: %v\n", time.Duration(stats["max_wait_time"]))
+		}
 
 	}
 	fmt.Println("--------------------------------")
@@ -638,7 +891,9 @@ func filterStack(stack []byte) string {
 // getCallerInfo returns the caller information for the function that called Lock or RLock.
 // It skips the runtime, testing, and debug frames to focus on application code.
 // except for tests where we want to see the test code in the stack trace
-func getCallerInfo() string {
+// optional numlines parameter controls how many lines to return
+func getCallerInfo(numLines ...int) string {
+
 	var pcs [32]uintptr
 	n := runtime.Callers(0, pcs[:]) // Increase skip count to 3 to get past runtime frames
 	frames := runtime.CallersFrames(pcs[:n])
@@ -646,7 +901,11 @@ func getCallerInfo() string {
 	// Get the first 3 non-runtime frames
 	callerInfo := ""
 	callerInfoLines := 0
-	for callerInfoLines <= 3 {
+	keep := 3
+	if len(numLines) > 0 {
+		keep = numLines[0]
+	}
+	for callerInfoLines <= keep {
 		frame, more := frames.Next()
 		if shouldIncludeLine(frame.File) {
 			// we want to the last part of the function name after the last /
