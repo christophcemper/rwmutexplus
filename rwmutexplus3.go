@@ -119,6 +119,16 @@ func (rw *RWMutexPlus) OverrideDebugLevelFromEnv() bool {
 	return false
 }
 
+func (rw *RWMutexPlus) OverrideWarningTimeoutFromEnv() bool {
+	if timeout := GetDurationEnvOrDefault("RWMUTEXTPLUS_TIMEOUT", rw.warningTimeout); timeout > 0 {
+		rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - RWMUTEXTPLUS_TIMEOUT (%v)",
+			rw.name, rw.warningTimeout, timeout), 1)
+		rw.warningTimeout = timeout
+		return true
+	}
+	return false
+}
+
 func (rw *RWMutexPlus) WithCallerInfoLines(lines int) *RWMutexPlus {
 	rw.callerInfoLines = lines
 	rw.DebugPrint(fmt.Sprintf("\nDEBUG: RWMutexPlus (%s, %v) - WithCallerInfoLines (%d)", rw.name, rw.warningTimeout, lines), 1)
@@ -145,6 +155,7 @@ func NewRWMutexPlus(name string, warningTimeout time.Duration, logger *log.Logge
 
 	mutex.OverrideVerboseLevelFromEnv()
 	mutex.OverrideDebugLevelFromEnv()
+	mutex.OverrideWarningTimeoutFromEnv()
 
 	// Register with global registry
 	globalRegistry.register(mutex)
